@@ -216,6 +216,67 @@ def score_avg(idx_list, pairs_df, score_col):
     return tensor_avg.item()
 
 
+def groups_df(similarity_df_threshold, df):  # df = all_mexico
+    """
+    The function receives a similarity df and the city df and return the rows above the threshold from the dataframe
+    """
+
+    # add 'group' column to the above threshold indices and order the dataframe by group
+    display_columns = ['name', 'address', 'about', 'tags', 'price', 'duration', 'd_source']
+    scores = ["score", "name_score", "address_score"]
+
+    # extract the indices
+    above_threshold_idx = list(set(np.array([idx for idx in similarity_df_threshold["index"]]).ravel()))
+
+    # extract the relevant rows from the dataframe
+    df_above_threshold = df.loc[above_threshold_idx][display_columns]
+
+    # add 'group' column
+    df_above_threshold['about_avg_score'] = 0
+    df_above_threshold["name_avg_score"] = 0
+    df_above_threshold["address_avg_score"] = 0
+    df_above_threshold["final_avg_score"] = 0
+    df_above_threshold['group'] = 0
+
+    # divide the indices to groups according to similarity
+    sets_list = groups_idx(similarity_df_threshold)
+
+    # update the group columns according to the groups
+    for i, group in enumerate(sets_list):
+        df_above_threshold['group'].loc[list(group)] = i + 1
+        df_above_threshold['about_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
+                                                                           "score")
+        df_above_threshold['name_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
+                                                                          "name_score")
+        df_above_threshold['address_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
+                                                                             "address_score")
+        df_above_threshold["final_avg_score"].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
+                                                                           "final_score")
+
+    # order the dataframe by 'group'
+    df_above_threshold = df_above_threshold.sort_values(by='group')
+
+    # change the order of the columns so that 'group' will be first
+    cols = df_above_threshold.columns.to_list()
+    cols = cols[-1:] + cols[:-1]
+    df_above_threshold = df_above_threshold[cols]
+    return df_above_threshold
+
+
+def data_attributes(df):
+    """
+    :param df: The groups dataframe that was extracted from the original data
+    :return: print the dataframe information
+    """
+    print("Number of groups in the data:", df["group"].unique())
+    print("\n")
+    print("Number of rows in the data:", df.shape[0])
+    print("\n")
+    print("row count in each group:\n")
+    print(df.groupby("group")["name"].count())
+
+
+
 def main():
     # config logger
     logger = init_logger()
@@ -255,5 +316,15 @@ def main():
 
     # define similarity threshold dataframe
     threshold = 0.8
+    # filtering according to 'about' column.
     similarity_df_threshold = similarity_df[similarity_df["score"] > threshold]
 
+    # extract the rows above the threshold from the dataframe
+    similarity_df_groups = groups_df(similarity_df_threshold, df_reduced)
+
+    # saving the groups dataframe to a csv file
+    logger.info(f'save location: {args.save}')
+    similarity_df_groups.to_csv(args.save)
+
+    # print groups dataframe information
+    data_attributes(similarity_df_groups)
