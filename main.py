@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 import warnings
@@ -10,6 +11,10 @@ from collections import Counter
 from configparser import ConfigParser
 from sentence_transformers import SentenceTransformer, util
 
+# read config file
+config_object = ConfigParser()
+config_object.read("pr_config.ini")
+
 
 def parse_args(logger):
     """
@@ -20,7 +25,7 @@ def parse_args(logger):
     my_parser.add_argument('--path', '-p',
                            required=True,
                            type=str,
-                           help=config_object['params']['path_help'])
+                           help="config_object['params']['path_help']")
 
     my_parser.add_argument('--save', '-s',
                            required=False,
@@ -93,9 +98,11 @@ def remove_duplicates_and_nan(df, logger):
     logger.info(f"Shape before removing duplicates and Nans: {df.shape}")
     print("Shape before removing duplicates and Nans:", df.shape)
     try:
-        # I exclude 'address' from 'drop_duplicates' because in many rows the address is un accurate
+        # I exclude 'address' from 'drop_duplicates' because in many rows the address is inaccurate or missing so the
+        # duplicates will be expressed especially according to 'name' and 'about'
         df.drop_duplicates(subset=['name', 'about'], inplace=True)
         df.dropna(subset=['name', 'about', 'address'], inplace=True)
+        df.reset_index(inplace=True)
     except KeyError as er:
         logger.debug("One or more columns from the list ['name','about'] are missing from the "
                      "DataFrame!")
@@ -287,7 +294,7 @@ def main():
 
     # validate the input
     if not val_input(args, logger):
-        logger.debug('terminating due to invalid input')
+        logger.debug('Terminating due to invalid input')
         exit()
 
     # load the data
@@ -314,10 +321,8 @@ def main():
     similarity_df["final_score"] = (similarity_df["score"] + similarity_df["name_score"] + similarity_df[
         "address_score"]) / len(scores)
 
-    # define similarity threshold dataframe
-    threshold = 0.8
     # filtering according to 'about' column.
-    similarity_df_threshold = similarity_df[similarity_df["score"] > threshold]
+    similarity_df_threshold = similarity_df[similarity_df["score"] > float(config_object['const']['threshold'])]
 
     # extract the rows above the threshold from the dataframe
     similarity_df_groups = groups_df(similarity_df_threshold, df_reduced)
@@ -328,3 +333,7 @@ def main():
 
     # print groups dataframe information
     data_attributes(similarity_df_groups)
+
+
+if __name__ == "__main__":
+    main()
