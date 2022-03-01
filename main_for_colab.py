@@ -316,7 +316,7 @@ def embeddings_for_model(group_vectors_df):
     return np.array(groups_vectors.tolist())
 
 
-def duplicates(similarity_groups, duplicates_df_groups):
+def duplicates(similarity_groups, duplicates_df_groups, logger):
     # remove the duplicates from the similarity_group dataframe
     similarity_groups_no_duplicates = similarity_groups.drop(index=duplicates_df_groups.index)
 
@@ -336,8 +336,10 @@ def duplicates(similarity_groups, duplicates_df_groups):
 
         # if group source is exclusively from musemunts or tiqets, the attractions may be similars but can't be
         # duplicates!
-        if similar_group["source"].unique().all() == "Musement" or similar_group["source"].unique().all() == "Tiqets":
+        reliable_sources = ["Musement", "Tiqets", "Ticketmaster", "Getyourguide"]
+        if similar_group["source"].unique().all() in reliable_sources:
             continue
+
         # extracting the repeated tags
         tags_count = similar_group["prediction"].value_counts()
         repeated_tags = tags_count[tags_count.values > 1].index
@@ -359,9 +361,14 @@ def duplicates(similarity_groups, duplicates_df_groups):
                         duplicates_df = pd.concat([duplicates_df, similar_duration_and_tags_rows])
 
     duplicates_df = pd.concat([duplicates_df, duplicates_df_groups])
-    if duplicates_df.shape == (0, 0):
+
+    # if no duplicates were found
+    if duplicates_df.shape[0] == 0:
         print("No duplicates were found!")
+        logger.info("No duplicates were found!")
     else:
+        duplicates_df.to_csv("duplicates.csv")
+        logger.info("Created duplicates.csv file")
         return duplicates_df
 
 
@@ -370,7 +377,7 @@ def data_attributes(df):
     :param df: The groups dataframe that was extracted from the original data
     :return: print the dataframe information
     """
-    print("Number of groups in the data:", df["group"].unique())
+    print("Number of groups in the data:", df["group"].nunique())
     print("\n")
     print("Number of rows in the data:", df.shape[0])
     print("\n")
@@ -422,7 +429,7 @@ def main():
     data_attributes(similarity_df_groups)
 
     #### creating dataframe for the similarity between the groups
-    groups_vectors = group_vectors_df(similarity_df_groups)
+    groups_vectors = group_vectors_df(similarity_df_groups, embeddings)
 
     model_embeddings = embeddings_for_model(groups_vectors)
     groups_similarity = pairs_df_model(model_embeddings)
@@ -437,7 +444,7 @@ def main():
     duplicates_df_groups = groups_df(duplicates_threshold, df_reduced)
 
     duplicates_df = duplicates(similarity_df_groups, duplicates_df_groups)
-    duplicates_df.to_csv("duplicates_groups_mexico.csv")
+    #duplicates_df.to_csv("duplicates_groups_mexico.csv")
 
 
 if __name__ == "__main__":
