@@ -1,11 +1,9 @@
 import os
-import sys
-import logging
-import warnings
-import argparse
 import datetime
 import numpy as np
 import pandas as pd
+import logging
+import argparse
 from itertools import combinations
 from collections import Counter
 from configparser import ConfigParser
@@ -83,13 +81,18 @@ def init_logger():
     return logger
 
 
-def unavailable_to_nan(df):
+def unavailable_to_nan(df, logger):
     """
     Transforming 'unavailable' to np.nan
     """
     text_cols = ["about", "name", "address"]
     for col in text_cols:
-        df[col] = df[col].apply(lambda x: np.nan if x == 'unavailable' else x)
+        try:
+            df[col] = df[col].apply(lambda x: np.nan if x == 'unavailable' else x)
+        except KeyError as er:
+            logger.debug(f'{col} column is missing from the DataFrame!')
+            print(er)
+            sys.exit(1)
 
 
 def remove_duplicates_and_nan(df, logger):
@@ -114,9 +117,9 @@ def remove_duplicates_and_nan(df, logger):
     return df
 
 
-def model_similarity(text_df, col):
+def model_embedding(text_df, col):
     """
-  return ordered similarity df with the columns: index, ind1, ind2, score
+  return the embeddings (as torch) of all the text column
   """
     model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -124,9 +127,16 @@ def model_similarity(text_df, col):
     sentences = text_df[col].values
 
     # Compute embeddings
-    embeddings = model.encode(sentences, convert_to_tensor=True)
+    embeddings = model.encode(sentences, convert_to_tensor=True)  # each text transforms to a vector
+    return embeddings
 
-    # Compute cosine-similarities for each sentence with each other sentence
+
+def pairs_df_model(embeddings):
+    """
+  receive embeddings as dataframe.
+  Return a DataFrame of computed cosine-similarities for each embedded vector with each other embedded vector.
+  The shape of the DataFrame supposed to be (len(embedding), len(embeddings))
+  """
     cosine_scores = util.cos_sim(embeddings, embeddings)
 
     # Find the pairs with the highest cosine similarity scores
@@ -150,9 +160,10 @@ def model_similarity(text_df, col):
 def df_for_model(df, text_col, name_score):
     """
     The function receives dataframe and a text column (not 'about') according to which the similarity will be calculated
-    and retrieves a similarity df
+    and retrieves a similarity df with the columns: name_score, "ind1", "ind2"
     """
-    df_similarity = model_similarity(df, text_col)
+    embedding = model_embedding(df, text_col)
+    df_similarity = pairs_df_model(embedding)
     df_similarity.rename(columns={"score": name_score}, inplace=True)
     return df_similarity.drop(columns=["index"])
 
@@ -164,7 +175,7 @@ def merge_df(df1, df2):
     return pd.merge(df1, df2, on=["ind1", "ind2"], how="inner")
 
 
-def groups_idx(similarity_df):  # similarity_df = similarity_df_threshold
+def groups_idx(similarity_df):
     """
     :param similarity_df: receive the similarity df above a certain threshold
     :return: a tuples list of all groups indices (A group consists of the pairs of a particular index and the pairs of
@@ -223,13 +234,14 @@ def score_avg(idx_list, pairs_df, score_col):
     return tensor_avg.item()
 
 
-def groups_df(similarity_df_threshold, df):  # df = all_mexico
+def groups_df(similarity_df_threshold, df):  # df = all_mexico_reduced
     """
     The function receives a similarity df and the city df and return the rows above the threshold from the dataframe
     """
 
     # add 'group' column to the above threshold indices and order the dataframe by group
-    display_columns = ['name', 'address', 'about', 'tags', 'price', 'duration', 'd_source']
+    display_columns = ['name', 'address', 'location_point', 'about', 'tags', 'prediction', 'price', 'duration',
+                       'source', 'external_id']
     scores = ["score", "name_score", "address_score"]
 
     # extract the indices
@@ -250,7 +262,7 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico
 
     # update the group columns according to the groups
     for i, group in enumerate(sets_list):
-        df_above_threshold['group'].loc[list(group)] = i + 1
+        df_above_threshold['group'].loc[list(group)] = i
         df_above_threshold['about_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
                                                                            "score")
         df_above_threshold['name_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
@@ -270,12 +282,136 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico
     return df_above_threshold
 
 
+def avg_vec(embeddings_df, group_idx):
+    """
+    return a np.array of the average vector of the indices of a certain group.
+    group_idx can be a set or a list.
+    """
+    return np.array(np.mean(embeddings_df.loc[group_idx], axis=0))
+
+
+def group_vectors_df(similarity_df_groups, embeddings):
+    """
+  creates a DataFrame of group number, and it's average vector
+  in order to find similarities between the groups
+  """
+    groups_vectors_df = pd.DataFrame()
+    groups_vectors_df["group"] = similarity_df_groups["group"].unique()
+    groups_vectors_df.set_index("group", inplace=True)
+    groups_vectors_df["avg_vector"] = 0
+
+    avg_vectors_list = list()
+    for group in groups_vectors_df.index:
+        # extracting the indices of the group
+        group_idx = similarity_df_groups[similarity_df_groups["group"] == group].index
+        avg_vectors_list.append(avg_vec(embeddings, group_idx))
+    groups_vectors_df["avg_vector"] = avg_vectors_list
+    return groups_vectors_df
+
+
+def embeddings_for_model(group_vectors_df):
+    """
+    Retrieve vectors dataframe and return the data as a numpy array for the similarity model
+    """
+    groups_vectors = group_vectors_df["avg_vector"].values
+    return np.array(groups_vectors.tolist())
+
+
+def last_col_first(df):
+    """
+  changing the order of the columns so the last column will be the first column in the dataframe
+  """
+    cols = df.columns.to_list()
+    cols = cols[-1:] + cols[:-1]
+    return df[cols]
+
+
+def duplicates(similarity_groups, duplicates_df_groups, logger):
+    """
+    :param similarity_groups: similarity dataframe
+    :param duplicates_df_groups: similarity df of "about" score > 0.99
+    :param logger: logger
+    :return: duplicates df and creates a "duplicates.csv" file
+    """
+    duplicate_group = 0
+
+    # remove the duplicates from the similarity_group dataframe
+    similarity_groups_no_duplicates = similarity_groups.drop(index=duplicates_df_groups.index)
+
+    # starting an empty DataFrame for the duplicates
+    duplicates_df = pd.DataFrame()
+
+    # transform "duration" == np.nan to zero for it to be count in "value_counts()"
+    # similarity_groups["duration"] = similarity_groups["duration"].fillna(0)
+
+    # for each group from the similarity DataFrame
+    # The below loop ignores attractions with "duration" == NAN and therefore I needed to drop the duplicates
+    # from the similarities (most of them has "duration" = NAN) and to concat it again after the loop
+    for group in similarity_groups_no_duplicates["group"].unique():
+
+        # extracting the rows of a certain group
+        similar_group = similarity_groups_no_duplicates[similarity_groups_no_duplicates["group"] == group]
+
+        reliable_sources = ["Musement", "Tiqets", "Ticketmaster", "Getyourguide"]
+
+        # extracting the repeated tags
+        tags_count = similar_group["prediction"].value_counts()
+
+        # list of the repeated tags
+        repeated_tags = tags_count[tags_count.values > 1].index
+
+        # if there are repeated tags inside the group
+        if len(repeated_tags) != 0:
+            for tag in repeated_tags:
+                # extract the rows from the group that have the same tag:
+                similar_tags_rows = similar_group[similar_group["prediction"] == tag]
+
+                # out of the rows with the same tag, extract the rows with the same duration:
+                duration_count = similar_tags_rows["duration"].value_counts()
+                repeated_duration = duration_count[duration_count.values > 1].index
+
+                # if there are repeated durations in the group
+                if len(repeated_duration) != 0:
+                    for duration in repeated_duration:
+                        similar_duration_and_tags_rows = similar_tags_rows[similar_tags_rows["duration"] == duration]
+                        similar_duration_and_tags_rows["duplicate_group"] = int(duplicate_group)
+                        duplicate_group += 1
+
+                        # changing the order of the columns so that the group number will be the first column
+                        similar_duration_and_tags_rows = last_col_first(similar_duration_and_tags_rows)
+
+                        # if group source is exclusively from musemunts or tiqets, the attractions may be similars but can't be
+                        # duplicates!
+                        if len(similar_duration_and_tags_rows["source"].unique()) == 1 and \
+                                similar_duration_and_tags_rows["source"].unique()[0] in reliable_sources:
+                            continue
+                        else:
+                            duplicates_df = pd.concat([duplicates_df, similar_duration_and_tags_rows])
+
+    # adding "duplicate_group" column to the duplicate of "about" > 0.99
+    duplicates_df_groups["duplicate_group"] = duplicates_df_groups["group"] + duplicate_group
+    duplicates_df_groups = last_col_first(duplicates_df_groups)
+
+    # concat the duplicate of "about" similarity > 0.99 to the duplicates of tags and duration
+    duplicates_df = pd.concat([duplicates_df, duplicates_df_groups])
+    duplicates_df.rename(columns={"group": "similarity_group"}, inplace=True)
+
+    # if no duplicates were found
+    if duplicates_df.shape[0] == 0:
+        print("No duplicates were found!")
+        logger.info("No duplicates were found!")
+    else:
+        duplicates_df.to_csv("duplicates.csv")
+        logger.info("Created duplicates.csv file")
+        return duplicates_df
+
+
 def data_attributes(df):
     """
     :param df: The groups dataframe that was extracted from the original data
     :return: print the dataframe information
     """
-    print("Number of groups in the data:", df["group"].unique())
+    print("Number of groups in the data:", df["group"].nunique())
     print("\n")
     print("Number of rows in the data:", df.shape[0])
     print("\n")
@@ -301,7 +437,7 @@ def main():
     raw_df = pd.read_csv(args.path, encoding='UTF-8')
 
     # 'unavailable' to NAN
-    unavailable_to_nan(raw_df)
+    unavailable_to_nan(raw_df, logger)
 
     # Remove rows which are exactly the same
     df_reduced = remove_duplicates_and_nan(raw_df, logger)
@@ -311,7 +447,9 @@ def main():
     address_similarity = df_for_model(df_reduced, "address", "address_score")
 
     # Creating similarity DataFrame according to 'about' column and according
-    about_similarity = model_similarity(df_reduced, "about")
+    embeddings_about = model_embedding(df_reduced, "about")
+    embeddings = pd.DataFrame(embeddings_about)
+    about_similarity = pairs_df_model(embeddings_about)
 
     # merging all the scores to one dataframe
     similarity_df = merge_df(about_similarity, merge_df(name_similarity, address_similarity))
@@ -328,11 +466,30 @@ def main():
     similarity_df_groups = groups_df(similarity_df_threshold, df_reduced)
 
     # saving the groups dataframe to a csv file
-    logger.info(f'save location: {args.save}')
-    similarity_df_groups.to_csv(args.save)
+    similarity_df_groups.to_csv("similarities.csv")
+    logger.info("Finished created 'similarities.csv' file")
 
     # print groups dataframe information
     data_attributes(similarity_df_groups)
+
+    #### creating dataframe for the similarity between the groups
+    groups_vectors = group_vectors_df(similarity_df_groups, embeddings)
+
+    model_embeddings = embeddings_for_model(groups_vectors)
+    groups_similarity = pairs_df_model(model_embeddings)
+    groups_similarity.to_csv("similarity_between_groups.csv")
+    logger.info("Finished created 'similarity_between_groups.csv' file")
+
+    ### creating a duplicate DataFrame
+
+    # Filtering according to 'about' similarity score > 0.99
+    duplicates_threshold = similarity_df_threshold[similarity_df["score"] > 0.99]
+
+    # extract the rows above the threshold 0.99 from the dataframe
+    duplicates_df_groups = groups_df(duplicates_threshold, df_reduced)
+
+    duplicates_df = duplicates(similarity_df_groups, duplicates_df_groups, logger)
+    # duplicates_df.to_csv("duplicates_groups_mexico.csv")
 
 
 if __name__ == "__main__":
