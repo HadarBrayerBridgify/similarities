@@ -82,7 +82,20 @@ def init_logger():
     return logger
 
 
-def unavailable_to_nan(df, col_list, logger):
+# def unavailable_to_nan(df, logger):
+#     """
+#     Transforming 'unavailable' to np.nan
+#     """
+#     text_cols = ["about", "name", "address"]
+#     for col in text_cols:
+#         try:
+#             df[col] = df[col].apply(lambda x: np.nan if x == 'unavailable' else x)
+#         except KeyError as er:
+#             logger.debug(f'{col} column is missing from the DataFrame!')
+#             print(er)
+#             sys.exit(1)
+
+def unavailable_to_nan(df, col_list, logger):  #########
     """ change the 'unavailable' to nan, replace nan with empty string for joining the text columns"""
 
     for col in col_list:
@@ -104,7 +117,8 @@ def remove_duplicates_and_nan(df, logger):
         # I exclude 'address' from 'drop_duplicates' because in many rows the address is inaccurate or missing so the
         # duplicates will be expressed especially according to 'name' and 'about'
         df.drop_duplicates(subset=['name', 'about', 'address'], inplace=True)
-        df.dropna(subset=["name_about"], inplace=True)
+        df.dropna(subset=['name', 'about', 'address'], inplace=True)
+        #df.dropna(subset=["name_about"], inplace=True) #######
         df.reset_index(inplace=True)
 
     except KeyError as er:
@@ -253,7 +267,9 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico_reduced
 
     # add 'group' column
     # df_above_threshold['about_avg_score'] = 0
-
+    # df_above_threshold["name_avg_score"] = 0
+    # df_above_threshold["address_avg_score"] = 0
+    # df_above_threshold["final_avg_score"] = 0
     df_above_threshold['group'] = 0
 
     # divide the indices to groups according to similarity
@@ -264,7 +280,12 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico_reduced
         df_above_threshold['group'].loc[list(group)] = i
         # df_above_threshold['about_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
         #                                                                    "score")
-
+        # df_above_threshold['name_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
+        #                                                                   "name_score")
+        # df_above_threshold['address_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
+        #                                                                      "address_score")
+        # df_above_threshold["final_avg_score"].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
+        #                                                                    "final_score")
 
     # order the dataframe by 'group'
     df_above_threshold = df_above_threshold.sort_values(by='group')
@@ -436,7 +457,11 @@ def main():
     # Remove rows which are exactly the same
     raw_df["name_about"] = raw_df["name"] + ' ' + raw_df["about"]
     df_reduced = remove_duplicates_and_nan(raw_df, logger)
+    #df_reduced["name_about"] = df_reduced["name"] + ' ' + df_reduced["about"]
 
+    # Creating similarities DataFrames according to 'name' and 'address'
+    name_similarity = df_for_model(df_reduced, "name", "name_score")
+    address_similarity = df_for_model(df_reduced, "address", "address_score")
 
     # Creating similarity DataFrame according to 'about' column and according
     embeddings_about = model_embedding(df_reduced, "name_about")
@@ -444,7 +469,12 @@ def main():
     about_similarity = pairs_df_model(embeddings_about)
 
     # merging all the scores to one dataframe
-    similarity_df = about_similarity
+    similarity_df = merge_df(about_similarity, merge_df(name_similarity, address_similarity))
+
+    # creating a new column of 'final_score' that is the average score of all scores
+    scores = [col for col in similarity_df.columns if 'score' in col]
+    similarity_df["final_score"] = (similarity_df["score"] + similarity_df["name_score"] + similarity_df[
+        "address_score"]) / len(scores)
 
     # filtering according to 'about' column.
     similarity_df_threshold = similarity_df[similarity_df["score"] > float(config_object['const']['threshold'])]
