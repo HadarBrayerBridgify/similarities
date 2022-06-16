@@ -1,6 +1,7 @@
 import os
 import datetime
 import sys
+import re
 import numpy as np
 import pandas as pd
 import logging
@@ -116,6 +117,25 @@ def remove_duplicates_and_nan(df, logger):
     logger.info(f"Shape after removing duplicates: {df.shape}")
     print("Shape after removing duplicates:", df.shape)
     return df
+
+
+def tags_format(df):
+    """
+    Transforming each tag in "categories_list" column to a list
+     """
+    try:
+        return df["categories_list"].apply(
+            lambda x: list(
+                set([j.strip().title() for j in re.sub(r'[()\[\'"{}\]]', '', x).strip().split(",")])) if type(
+                x) != list else x)
+    except Exception as er:
+        # log_f.logger.debug('Check "categories_list" column or categories_list format')
+        print(er)
+        sys.exit(1)
+
+
+def strip_list(df, col):
+    df[col] = df[col].apply(lambda x: [ele for ele in x if ele.strip()])
 
 
 def model_embedding(text_df, col):
@@ -241,7 +261,8 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico_reduced
     """
 
     # add 'group' column to the above threshold indices and order the dataframe by group
-    display_columns = ['title', 'address', 'geolocation', 'description', 'categories_list', 'prediction', 'price', 'duration',
+    display_columns = ['title', 'address', 'geolocation', 'description', 'categories_list', 'prediction', 'price',
+                       'duration',
                        'inventory_supplier', 'external_id']
     scores = ["score", "title_score", "address_score"]
 
@@ -264,7 +285,6 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico_reduced
         df_above_threshold['group'].loc[list(group)] = i
         # df_above_threshold['description_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
         #                                                                    "score")
-
 
     # order the dataframe by 'group'
     df_above_threshold = df_above_threshold.sort_values(by='group')
@@ -348,7 +368,6 @@ def duplicates(similarity_groups, duplicates_df_groups, logger):
 
         reliable_sources = ["Musement", "Tiqets", "Ticketmaster", "Getyourguide"]
 
-
         # extracting the repeated tags
         tags_count = similar_group["prediction"].value_counts()
 
@@ -375,7 +394,7 @@ def duplicates(similarity_groups, duplicates_df_groups, logger):
                         # changing the order of the columns so that the group number will be the first column
                         similar_duration_and_tags_rows = last_col_first(similar_duration_and_tags_rows)
 
-                        # if group source is exclusively from musemunts or tiqets, the attractions may be similars but can't be
+                        # if group source is exclusively from reliable_sources, the attractions may be similars but can't be
                         # duplicates!
                         if len(similar_duration_and_tags_rows["inventory_supplier"].unique()) == 1 and \
                                 similar_duration_and_tags_rows["inventory_supplier"].unique()[0] in reliable_sources:
@@ -414,7 +433,6 @@ def data_attributes(df):
     print(df.groupby("group")["title"].count())
 
 
-
 def main():
     # config logger
     logger = init_logger()
@@ -430,6 +448,15 @@ def main():
 
     # load the data
     raw_df = pd.read_csv(args.path, encoding='UTF-8')
+    raw_df = raw_df.rename(
+        columns={"name": "title", "about": "description", "tags": "categories_list", "source": "inventory_supplier",
+                 "location_point": "geolocation"})
+
+    # create 'prediction' column if not exist (string of ordered list of the categories_list: '[Art, Museums, Shopping]')
+    if 'prediction' not in raw_df.columns:
+        raw_df["prediction"] = tags_format(raw_df)
+        strip_list(raw_df, "prediction")
+        raw_df["prediction"] = raw_df["prediction"].apply(lambda x: str(x))
 
     # 'unavailable' to NAN
     unavailable_to_nan(raw_df, ["title", "description"], logger)
@@ -437,7 +464,6 @@ def main():
     # Remove rows which are exactly the same
     raw_df["text"] = raw_df["title"] + ' ' + raw_df["description"]
     df_reduced = remove_duplicates_and_nan(raw_df, logger)
-
 
     # Creating similarity DataFrame according to 'text'
     embeddings_text = model_embedding(df_reduced, "text")
@@ -482,4 +508,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

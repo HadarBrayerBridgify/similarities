@@ -185,6 +185,24 @@ def remove_duplicates_and_nan(df):
     return df
 
 
+def tags_format(df):
+    """
+    Transforming each tag in "categories_list" column to a list
+     """
+    try:
+        return df["categories_list"].apply(
+            lambda x: list(
+                set([j.strip().title() for j in re.sub(r'[()\[\'"{}\]]', '', x).strip().split(",")])) if type(
+                x) != list else x)
+    except Exception as er:
+        # log_f.logger.debug('Check "categories_list" column or categories_list format')
+        print(er)
+        sys.exit(1)
+
+
+def strip_list(df, col):
+    df[col] = df[col].apply(lambda x: [ele for ele in x if ele.strip()])
+
 def model_embedding(text_df, col):
     """
   return the embeddings (as torch) of all the text column
@@ -505,6 +523,12 @@ def main(city):
     with fs.open(BUCKET_NAME+'/tagging_output/' + city + '_predicted_data.csv', 'r') as f:
         raw_df = pd.read_csv(f)
     print("DF read")
+
+    # create 'prediction' column if not exist (string of ordered list of the categories_list: '[Art, Museums, Shopping]')
+    if 'prediction' not in raw_df.columns:
+        raw_df["prediction"] = tags_format(raw_df)
+        strip_list(raw_df, "prediction")
+        raw_df["prediction"] = raw_df["prediction"].apply(lambda x: str(x))
 
     # 'unavailable' to NAN
     unavailable_to_nan(raw_df)
