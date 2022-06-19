@@ -156,7 +156,7 @@ def pairs_df_model(embeddings):
     """
   receive embeddings as dataframe.
   Return a DataFrame of computed cosine-similarities for each embedded vector with each other embedded vector.
-  The shape of the DataFrame supposed to be (len(embedding), len(embeddings))
+  The df shape: rows: (n!/(n-k)!k!), for k items out of n. columns: index, score, ind1, ind2
   """
     cosine_scores = util.cos_sim(embeddings, embeddings)
 
@@ -176,6 +176,25 @@ def pairs_df_model(embeddings):
     pairs_df["ind2"] = pairs_df["index"].apply(lambda x: x[1]).values
     # pairs_df = pairs_df[pairs_df["score"] > threshold]
     return pairs_df
+
+
+def similarity_matrix(similarity_idx_df, reduced_df):
+    """
+  Return n^2 similarity matrix. Each attraction has a similarity score in relation to each attraction in the data
+  """
+    similarity_matrix = pd.DataFrame(columns=[i for i in range(reduced_df.shape[0])], index=range(reduced_df.shape[0]))
+    for i in range(reduced_df.shape[0]):
+        for j in range(i, reduced_df.shape[0]):
+            if j == i:
+                similarity_matrix.iloc[i][j] = 1
+                similarity_matrix.iloc[j][i] = 1
+            else:
+                similarity_score = \
+                    similarity_idx_df[(similarity_idx_df["ind1"] == i) & (similarity_idx_df["ind2"] == j)][
+                        "score"].values
+                similarity_matrix.iloc[i][j] = similarity_score
+                similarity_matrix.iloc[j][i] = similarity_score
+    return similarity_matrix
 
 
 def df_for_model(df, text_col, name_score):
@@ -469,6 +488,10 @@ def main():
     embeddings_text = model_embedding(df_reduced, "text")
     embeddings = pd.DataFrame(embeddings_text)
     text_similarity = pairs_df_model(embeddings_text)
+
+    # create a square matrix of the similarity scores
+    similarity_matrix_text = similarity_matrix(text_similarity, df_reduced)
+    similarity_matrix_text.to_csv("similarity_matrix.csv", index=False)
 
     # merging all the scores to one dataframe
     similarity_df = text_similarity
