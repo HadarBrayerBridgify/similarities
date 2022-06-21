@@ -155,32 +155,54 @@ class AttractionsDataManager:
         return city_df.copy(deep=True)
 
 
-def unavailable_to_nan(df):
+def init_logger():
     """
-    Transforming 'unavailable' to np.nan
+    This function initialize the logger and returns its handle
     """
-    text_cols = ["description", "title", "address"]
-    for col in text_cols:
-        df[col] = df[col].apply(lambda x: np.nan if x == 'unavailable' else x)
+
+    log_formatter = logging.Formatter('%(levelname)s-%(asctime)s-FUNC:%(funcName)s-LINE:%(lineno)d-%(message)s')
+    logger = logging.getLogger('log')
+    logger.setLevel('DEBUG')
+    file_handler = logging.FileHandler('pr_log.txt')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(log_formatter)
+    logger.addHandler(file_handler)
+
+    return logger
 
 
-def remove_duplicates_and_nan(df):
+def unavailable_to_nan(df, col_list, logger):
+    """ change the 'unavailable' to nan, replace nan with empty string for joining the text columns"""
+
+    for col in col_list:
+        try:
+            df[col] = df[col].apply(lambda x: np.nan if x == 'unavailable' else x)
+            df[col] = df[col].fillna("")
+        except KeyError as er:
+            logger.debug(f'{col} column is missing from the DataFrame!')
+            print(er)
+            sys.exit(1)
+
+
+def remove_duplicates_and_nan(df, logger):
     """ Remove rows which are exactly the same """
 
-    print(f"Shape before removing duplicates and Nans: {df.shape}")
+    logger.info(f"Shape before removing duplicates and Nans: {df.shape}")
     print("Shape before removing duplicates and Nans:", df.shape)
     try:
         # I exclude 'address' from 'drop_duplicates' because in many rows the address is inaccurate or missing so the
-        # duplicates will be expressed especially according to 'name' and 'about'
-        df.drop_duplicates(subset=['title', 'description'], inplace=True)
-        df.dropna(subset=['title', 'description', 'address'], inplace=True)
+        # duplicates will be expressed especially according to 'title' and 'description'
+        df.drop_duplicates(subset=['title', 'description', 'address'], inplace=True)
+        df.dropna(subset=["text"], inplace=True)
         df.reset_index(inplace=True)
+
     except KeyError as er:
-        exit("One or more columns from the list ['title','description'] are missing from the "
+        logger.debug("One or more columns from the list ['title','description'] are missing from the "
                      "DataFrame!")
+        print(er)
+        sys.exit(1)
 
-
-    print(f"Shape after removing duplicates: {df.shape}")
+    logger.info(f"Shape after removing duplicates: {df.shape}")
     print("Shape after removing duplicates:", df.shape)
     return df
 
@@ -200,8 +222,31 @@ def tags_format(df):
         sys.exit(1)
 
 
+def data_preprocess(raw_df, logger):
+    """
+    return preprocessed dataframe
+    """
+    raw_df = raw_df.rename(
+        columns={"name": "title", "about": "description", "tags": "categories_list", "source": "inventory_supplier",
+                 "location_point": "geolocation"})
+    if 'prediction' not in raw_df.columns:
+        raw_df["prediction"] = tags_format(raw_df)
+        strip_list(raw_df, "prediction")
+        raw_df["prediction"] = raw_df["prediction"].apply(lambda x: str(x))
+
+    # 'unavailable' to NAN
+    unavailable_to_nan(raw_df, ["title", "description"], logger)
+
+    # Remove rows which are exactly the same
+    raw_df["text"] = raw_df["title"] + ' ' + raw_df["description"]
+    df = remove_duplicates_and_nan(raw_df, logger)
+    logger.info("The data were processed")
+    return df
+
+
 def strip_list(df, col):
     df[col] = df[col].apply(lambda x: [ele for ele in x if ele.strip()])
+
 
 def model_embedding(text_df, col):
     """
@@ -221,7 +266,7 @@ def pairs_df_model(embeddings):
     """
   receive embeddings as dataframe.
   Return a DataFrame of computed cosine-similarities for each embedded vector with each other embedded vector.
-  The shape of the DataFrame supposed to be (len(embedding), len(embeddings))
+  The df shape: rows: (n!/(n-k)!k!), for k items out of n. columns: index, score, ind1, ind2
   """
     cosine_scores = util.cos_sim(embeddings, embeddings)
 
@@ -243,9 +288,28 @@ def pairs_df_model(embeddings):
     return pairs_df
 
 
+def similarity_matrix(similarity_idx_df, reduced_df):
+    """
+  Return n^2 similarity matrix. Each attraction has a similarity score in relation to each attraction in the data
+  """
+    similarity_matrix = pd.DataFrame(columns=[i for i in range(reduced_df.shape[0])], index=range(reduced_df.shape[0]))
+    for i in range(reduced_df.shape[0]):
+        for j in range(i, reduced_df.shape[0]):
+            if j == i:
+                similarity_matrix.iloc[i][j] = 1
+                similarity_matrix.iloc[j][i] = 1
+            else:
+                similarity_score = \
+                    similarity_idx_df[(similarity_idx_df["ind1"] == i) & (similarity_idx_df["ind2"] == j)][
+                        "score"].values
+                similarity_matrix.iloc[i][j] = similarity_score
+                similarity_matrix.iloc[j][i] = similarity_score
+    return similarity_matrix
+
+
 def df_for_model(df, text_col, name_score):
     """
-    The function receives dataframe and a text column (not 'about') according to which the similarity will be calculated
+    The function receives dataframe and a text column (not 'description') according to which the similarity will be calculated
     and retrieves a similarity df with the columns: name_score, "ind1", "ind2"
     """
     embedding = model_embedding(df, text_col)
@@ -326,10 +390,10 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico_reduced
     """
 
     # add 'group' column to the above threshold indices and order the dataframe by group
-    display_columns = ['uuid', 'title', 'address', 'geolocation', 'description', 'categories_list', 'prediction', 'price', 'duration',
+    display_columns = ['title', 'address', 'geolocation', 'description', 'categories_list', 'prediction', 'price',
+                       'duration',
                        'inventory_supplier', 'external_id']
-    
-    scores = ["score", "name_score", "address_score"]
+    scores = ["score", "title_score", "address_score"]
 
     # extract the indices
     above_threshold_idx = list(set(np.array([idx for idx in similarity_df_threshold["index"]]).ravel()))
@@ -338,10 +402,8 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico_reduced
     df_above_threshold = df.loc[above_threshold_idx][display_columns]
 
     # add 'group' column
-    df_above_threshold['about_avg_score'] = 0
-    df_above_threshold["name_avg_score"] = 0
-    df_above_threshold["address_avg_score"] = 0
-    df_above_threshold["final_avg_score"] = 0
+    # df_above_threshold['description_avg_score'] = 0
+
     df_above_threshold['group'] = 0
 
     # divide the indices to groups according to similarity
@@ -350,14 +412,8 @@ def groups_df(similarity_df_threshold, df):  # df = all_mexico_reduced
     # update the group columns according to the groups
     for i, group in enumerate(sets_list):
         df_above_threshold['group'].loc[list(group)] = i
-    #     df_above_threshold['about_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
-    #                                                                        "score")
-    #     df_above_threshold['name_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
-    #                                                                       "name_score")
-    #     df_above_threshold['address_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
-    #                                                                          "address_score")
-    #     df_above_threshold["final_avg_score"].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
-    #                                                                        "final_score")
+        # df_above_threshold['description_avg_score'].loc[list(group)] = score_avg(list(group), similarity_df_threshold,
+        #                                                                    "score")
 
     # order the dataframe by 'group'
     df_above_threshold = df_above_threshold.sort_values(by='group')
@@ -413,32 +469,29 @@ def last_col_first(df):
     return df[cols]
 
 
-def duplicates(similarity_groups, duplicates_df_groups):
+def duplicates(similarity_groups, similarity_matrix, logger):
     """
     :param similarity_groups: similarity dataframe
-    :param duplicates_df_groups: similarity df of "about" score > 0.99
+    :param similarity_matrix: similarity df of "text" score
+    :param logger: logger
     :return: duplicates df and creates a "duplicates.csv" file
     """
     duplicate_group = 0
 
     # remove the duplicates from the similarity_group dataframe
-    similarity_groups_no_duplicates = similarity_groups.drop(index=duplicates_df_groups.index)
+    #similarity_groups_no_duplicates = similarity_groups.drop(index=duplicates_df_groups.index)
 
     # starting an empty DataFrame for the duplicates
     duplicates_df = pd.DataFrame()
 
-    # transform "duration" == np.nan to zero for it to be count in "value_counts()"
-    # similarity_groups["duration"] = similarity_groups["duration"].fillna(0)
-
-    # for each group from the similarity DataFrame
-    # The below loop ignores attractions with "duration" == NAN and therefore I needed to drop the duplicates
-    # from the similarities (most of them has "duration" = NAN) and to concat it again after the loop
-    for group in similarity_groups_no_duplicates["group"].unique():
+    # checking for duplicates in every group of similarity
+    for group in similarity_groups["group"].unique():
 
         # extracting the rows of a certain group
-        similar_group = similarity_groups_no_duplicates[similarity_groups_no_duplicates["group"] == group]
+        similar_group = similarity_groups[similarity_groups["group"] == group]
 
         reliable_sources = ["Musement", "Tiqets", "Ticketmaster", "Getyourguide"]
+        not_reliable_suppliers = ["GoogleMaps", "Viator"]
 
         # extracting the repeated tags
         tags_count = similar_group["prediction"].value_counts()
@@ -448,6 +501,7 @@ def duplicates(similarity_groups, duplicates_df_groups):
 
         # if there are repeated tags inside the group
         if len(repeated_tags) != 0:
+
             for tag in repeated_tags:
                 # extract the rows from the group that have the same tag:
                 similar_tags_rows = similar_group[similar_group["prediction"] == tag]
@@ -460,6 +514,27 @@ def duplicates(similarity_groups, duplicates_df_groups):
                 if len(repeated_duration) != 0:
                     for duration in repeated_duration:
                         similar_duration_and_tags_rows = similar_tags_rows[similar_tags_rows["duration"] == duration]
+
+                        # Find the median
+                        median_price = np.median(similar_duration_and_tags_rows["price"])
+
+                        # delete the attractions that are not within 20% of the median
+                        median_range = median_price * 0.2
+                        median_bottom = median_price - median_range
+                        median_top = median_price + median_range
+                        idx_to_drop = list()
+
+                        for row in similar_duration_and_tags_rows.index:
+                            if not median_bottom <= similar_duration_and_tags_rows.loc[row]["price"] <= median_top:
+                                print("bottom:", median_bottom)
+                                print("top", median_top)
+                                print("price:", similar_duration_and_tags_rows.loc[row]["price"])
+                                idx_to_drop.append(row)
+                        similar_duration_and_tags_rows.drop(index=idx_to_drop, inplace=True)
+                        # if there are no duplicates after dropping the indices
+                        if not similar_duration_and_tags_rows.shape[0] > 1:
+                            continue
+
                         similar_duration_and_tags_rows["duplicate_group"] = int(duplicate_group)
                         duplicate_group += 1
 
@@ -468,26 +543,35 @@ def duplicates(similarity_groups, duplicates_df_groups):
 
                         # if group source is exclusively from musemunts or tiqets, the attractions may be similars but can't be
                         # duplicates!
-                        if len(similar_duration_and_tags_rows["source"].unique()) == 1 and \
-                                similar_duration_and_tags_rows["source"].unique()[0] in reliable_sources:
+                        if len(similar_duration_and_tags_rows["inventory_supplier"].unique()) == 1 and \
+                                similar_duration_and_tags_rows["inventory_supplier"].unique()[0] in reliable_sources:
                             continue
                         else:
+
+                            # create a column with every combination within the group and its score {'(idx1, idx2)': similarity_score}
+                            scores_dict = dict()
+                            idx_combinations = combinations(similar_duration_and_tags_rows.index, 2)
+                            for comb in idx_combinations:
+                                score = similarity_matrix.loc[comb[0]][comb[1]]
+                                scores_dict[str(comb)] = round(score, 2)
+                            similar_duration_and_tags_rows["scores"] = [scores_dict for i in
+                                                                        range(similar_duration_and_tags_rows.shape[0])]
                             duplicates_df = pd.concat([duplicates_df, similar_duration_and_tags_rows])
 
-    # adding "duplicate_group" column to the duplicate of "about" > 0.99
-    duplicates_df_groups["duplicate_group"] = duplicates_df_groups["group"] + duplicate_group
-    duplicates_df_groups = last_col_first(duplicates_df_groups)
+    duplicates_df = last_col_first(duplicates_df)
+    duplicates_df = last_col_first(duplicates_df)
 
-    # concat the duplicate of "about" similarity > 0.99 to the duplicates of tags and duration
-    duplicates_df = pd.concat([duplicates_df, duplicates_df_groups])
+    # concat the duplicate of "text" similarity > 0.99 to the duplicates of tags and duration
+    # duplicates_df = pd.concat([duplicates_df, duplicates_df_groups])
     duplicates_df.rename(columns={"group": "similarity_group"}, inplace=True)
 
     # if no duplicates were found
     if duplicates_df.shape[0] == 0:
         print("No duplicates were found!")
+        logger.info("No duplicates were found!")
     else:
         duplicates_df.to_csv("duplicates.csv")
-        print("Created duplicates.csv file")
+        logger.info("Created duplicates.csv file")
         return duplicates_df
 
 
@@ -520,46 +604,31 @@ def main(city):
     # # call tagging function TODO
 
     # # get tagged data
+
+    # config logger
+    logger = init_logger()
+    logger.info('STARTED RUNNING')
+
     with fs.open(BUCKET_NAME+'/tagging_output/' + city + '_predicted_data.csv', 'r') as f:
         raw_df = pd.read_csv(f)
     print("DF read")
 
-    # create 'prediction' column if not exist (string of ordered list of the categories_list: '[Art, Museums, Shopping]')
-    if 'prediction' not in raw_df.columns:
-        raw_df["prediction"] = tags_format(raw_df)
-        strip_list(raw_df, "prediction")
-        raw_df["prediction"] = raw_df["prediction"].apply(lambda x: str(x))
+    df_reduced = data_preprocess(raw_df, logger)
 
-    # 'unavailable' to NAN
-    unavailable_to_nan(raw_df)
-    print("unavailable")
+    # Creating similarity DataFrame according to "description" column and according
+    # Creating similarity DataFrame according to 'text'
+    embeddings_text = model_embedding(df_reduced, "text")
+    embeddings = pd.DataFrame(embeddings_text)
+    text_similarity = pairs_df_model(embeddings_text)
 
-    # Remove rows which are exactly the same
-    df_reduced = remove_duplicates_and_nan(raw_df)
-    print('df reduced')
-
-    # Creating similarities DataFrames according to 'name' and 'address'
-    name_similarity = df_for_model(df_reduced, "title", "name_score")
-    address_similarity = df_for_model(df_reduced, "address", "address_score")
-    print('name and address similarity dataframes created')
-
-    # Creating similarity DataFrame according to 'about' column and according
-    embeddings_about = model_embedding(df_reduced, "description")
-    embeddings = pd.DataFrame(embeddings_about)
-    about_similarity = pairs_df_model(embeddings_about)
-    print('about similarity dataframe created')
+    # create a square matrix of the similarity scores (should be inserted the database) #############
+    similarity_matrix_text = similarity_matrix(text_similarity, df_reduced)
+    similarity_matrix_text.to_csv("similarity_matrix.csv", index=False)
 
     # merging all the scores to one dataframe
-    similarity_df = merge_df(about_similarity, merge_df(name_similarity, address_similarity))
-    print('scores merged')
+    similarity_df = text_similarity
 
-    # creating a new column of 'final_score' that is the average score of all scores
-    scores = [col for col in similarity_df.columns if 'score' in col]
-    similarity_df["final_score"] = (similarity_df["score"] + similarity_df["name_score"] + similarity_df[
-        "address_score"]) / len(scores)
-    print('final_score column')
-
-    # filtering according to 'about' column.
+    # filtering according to 'description' column.
     similarity_df_threshold = similarity_df[similarity_df["score"] > float(config_object['const']['threshold'])]
     print('filtered')
 
@@ -567,9 +636,24 @@ def main(city):
     similarity_df_groups = groups_df(similarity_df_threshold, df_reduced)
     print('similarity groups extracted')
 
+    # Not in use at the moment!!
+    # #### creating dataframe for the similarity between the groups
+    # groups_vectors = group_vectors_df(similarity_df_groups, embeddings)
+    #
+    # model_embeddings = embeddings_for_model(groups_vectors)
+    # groups_similarity = pairs_df_model(model_embeddings)
+    # groups_similarity.to_csv("similarity_between_groups.csv")
+    # logger.info("Finished created 'similarity_between_groups.csv' file")
+    #
+    # ### creating a duplicate DataFrame
+    #
+    # duplicates_df = duplicates(similarity_df_groups, similarity_matrix_text, logger)
+    # # duplicates_df.to_csv("duplicates_groups_mexico.csv")
+
+
     # saving the groups dataframe to a csv file
     with fs.open(BUCKET_NAME+'/similarity_duplicate_output/' + city + ' similarities.csv', 'w') as f:
-        similarity_df_groups = similarity_df_groups.filter(items=['uuid','group'])
+        similarity_df_groups = similarity_df_groups.filter(items=['uuid', 'group'])
         similarity_df_groups.to_csv(f)
     # similarity_df_groups.to_csv("similarities.csv")
 
