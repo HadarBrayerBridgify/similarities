@@ -1,78 +1,27 @@
-import re
 import uuid
-import torch
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Set
+
 import numpy as np
 import pandas as pd
+import torch
+# from aws_services.simple_queue_service import SQSQueue
+# from database import DataBase
+from numpy import ndarray
+from pandas import DataFrame
 from sentence_transformers import SentenceTransformer, util
+from torch import Tensor
+
+import data_preprocessing as dp
+
+QUEUE_URL: str = (
+    "https://sqs.eu-central-1.amazonaws.com/236944115757/attraction-updates-queue.fifo"
+)
+SIMILARITY_THRESHOLD: float = 0.78
+MIN_CITY_ATTRACTION_COUNT: int = 100
 
 
-def unavailable_to_nan(df: pd.DataFrame, col_list: list[str]) -> None:
-    """
-    change 'unavailable' to empty string in the specified columns
-
-    Args:
-      df: raw DataFrame of attractions
-      col_list: list of text columns
-
-    Returns:
-      None
-
-    """
-
-    for col in col_list:
-        df[col] = df[col].apply(lambda x: np.nan if x == 'unavailable' else x)
-        df[col] = df[col].fillna("")
-
-
-def remove_duplicates_and_nan(df: pd.DataFrame) -> None:
-    """
-    Remove rows which are exactly the same and
-
-    Args:
-      df: DataFrame of attractions
-
-    Returns:
-      None
-
-     """
-    print("Shape before removing duplicates:", df.shape)
-    df.drop_duplicates(subset=['title', 'description', 'address'], inplace=True)
-    df.dropna(subset=["text"], inplace=True)
-    df.reset_index(inplace=True)
-    print("Shape after removing duplicates:", df.shape)
-
-
-def tags_format(df: pd.DataFrame) -> pd.Series:
-    """
-    Transforming each tag in "categories_list" column to a list of categories
-
-    Args:
-      DataFrame of attractions
-
-    Returns:
-      a DataFrame column (Series) with a list of categories in each entry
-     """
-
-    return df["categories_list"].apply(
-        lambda x: list(set([j.strip().title() for j in re.sub(r'[()\[\'"{}\]]', '', x).strip().split(",")])) if type(
-            x) != list else x)
-
-
-def strip_list(df: pd.DataFrame, col: str):
-    """
-    Remove empty items from a list of each entry of the prediction column
-
-    Args:
-      df: DataFrame with a new column for the different tags_format
-      col: str, the name of the new column with the new tags_format
-
-    Returns:
-      None
-    """
-    df[col] = df[col].apply(lambda x: [ele for ele in x if ele.strip()])
-
-
-def model_embedding(df: pd.DataFrame, col: str) -> torch.Tensor:
+def model_embedding(df: DataFrame, col: str) -> Tensor:
     """
     calculates the embeddings (as torch) of each entry in 'text' column according to SentenceTransformers
 
@@ -81,51 +30,16 @@ def model_embedding(df: pd.DataFrame, col: str) -> torch.Tensor:
       col: str, the name of the text column according to which the embeddings will be calculated
 
     Returns:
-      tourch.Tensor
+      torch.Tensor
     """
-    model = SentenceTransformer('all-MiniLM-L6-v2')
 
-    # Single list of sentences
+    model: SentenceTransformer = SentenceTransformer("all-MiniLM-L6-v2")
     sentences = df[col].values
-
-    # Compute embeddings
-    embeddings = model.encode(sentences, convert_to_tensor=True)  # each text transforms to a vector
-    print("finished embeddings")
+    embeddings: Tensor = model.encode(sentences, convert_to_tensor=True)
     return embeddings
 
 
-def data_preprocess(raw_df: pd.DataFrame):
-    """
-    preprocess the raw DataFrame: update the name of the columns if needed,
-    creates 'prediction' column with list of categories,
-    creates 'text' column of joining the title and description,
-    remove duplicate rows
-
-    Args:
-      raw_df: raw DataFrame of attractions
-
-    Returns:
-      Pre-processed DataFrame
-    """
-    raw_df = raw_df.rename(
-        columns={"name": "title", "about": "description", "tags": "categories_list", "source": "inventory_supplier",
-                 "location_point": "geolocation"})
-    if 'prediction' not in raw_df.columns:
-        raw_df["prediction"] = tags_format(raw_df)
-        strip_list(raw_df, "prediction")
-        raw_df["prediction"] = raw_df["prediction"].apply(lambda x: str(x))
-
-    # 'unavailable' to NAN
-    unavailable_to_nan(raw_df, ["title", "description"])
-
-    # Remove rows which are exactly the same
-    raw_df["text"] = raw_df["title"] + ' ' + raw_df["description"]
-    remove_duplicates_and_nan(raw_df)
-    print("The data were processed")
-    return raw_df
-
-
-def pairs_df_model(embeddings: torch.Tensor) -> pd.DataFrame:
+def pairs_df_model(embeddings: Tensor) -> DataFrame:
     """
     Compute cosine-similarities of each embedded vector with each other embedded vector
 
@@ -137,18 +51,14 @@ def pairs_df_model(embeddings: torch.Tensor) -> pd.DataFrame:
       (The shape of the DataFrame is: rows: (n!/(n-k)!k!), for k items out of n)
 
     """
-    cosine_scores = util.cos_sim(embeddings, embeddings)
 
-    # Find the pairs with the highest cosine similarity scores
-    pairs = []
+    cosine_scores: Tensor = util.cos_sim(embeddings, embeddings)
+    pairs: List[Dict[str, Any]] = []
     for i in range(len(cosine_scores) - 1):
         for j in range(i + 1, len(cosine_scores)):
-            pairs.append({'index': [i, j], 'score': cosine_scores[i][j]})
+            pairs.append({"index": [i, j], "score": cosine_scores[i][j]})
 
-    # Sort scores in decreasing order
-    pairs = sorted(pairs, key=lambda x: x['score'], reverse=True)
-
-    # transform to DataFrame and add split the pairs to two colums: 'ind1', 'ind2'
+    pairs = sorted(pairs, key=lambda x: x["score"], reverse=True)
     pairs_df = pd.DataFrame(pairs)
 
     pairs_df["ind1"] = pairs_df["index"].apply(lambda x: x[0]).values
@@ -157,7 +67,7 @@ def pairs_df_model(embeddings: torch.Tensor) -> pd.DataFrame:
     return pairs_df
 
 
-def similarity_matrix(similarity_idx_df, reduced_df):
+def similarity_matrix(similarity_idx_df: DataFrame, reduced_df: DataFrame) -> DataFrame:
     """
     creates n^2 similarity matrix. Each attraction has a similarity score in relation to each attraction in the data
 
@@ -166,58 +76,53 @@ def similarity_matrix(similarity_idx_df, reduced_df):
       reduced_df: preprocessed DataFrame
 
     Returns:
-      sqaure DataFrame. columns = index = the indices of the attractions. values: simialrity score
+      sqaure DataFrame. columns = index = the indices of the attractions. values: similarity score
     """
-    similarity_matrix = pd.DataFrame(columns=[i for i in range(reduced_df.shape[0])], index=range(reduced_df.shape[0]))
+
+    similarity_matrix: DataFrame = pd.DataFrame(
+        columns=[i for i in range(reduced_df.shape[0])],
+        index=range(reduced_df.shape[0]),
+    )
     for i in range(reduced_df.shape[0]):
         for j in range(i, reduced_df.shape[0]):
             if j == i:
                 similarity_matrix.iloc[i][j] = 1
                 similarity_matrix.iloc[j][i] = 1
             else:
-                similarity_score = \
-                similarity_idx_df[(similarity_idx_df["ind1"] == i) & (similarity_idx_df["ind2"] == j)]["score"].values
+                similarity_score = similarity_idx_df[
+                    (similarity_idx_df["ind1"] == i) & (similarity_idx_df["ind2"] == j)
+                ]["score"].values
                 similarity_matrix.iloc[i][j] = similarity_score
                 similarity_matrix.iloc[j][i] = similarity_score
     return similarity_matrix
 
 
-def groups_idx(similarity_df):
+def groups_idx(similarity_df: DataFrame) -> List[Set[int]]:
     """
-    Creates a list of tuples, each tuple is a similarity group which contains the attractions indices (A group consists of the pairs of a particular index and the pairs of
-    its pairs. There is no overlap of indices between the groups
+    Creates a list of sets, each tuple is a similarity group which contains the attractions indices (A group consists
+    of the pairs of a particular index and the pairs of its pairs. There is no overlap of indices between the groups
 
     Args:
       similarity_df: DataFrame output of the function pairs_df_model
 
     Returns:
-      a list of tuples. Each tuple contains attractions indices and represent a similarity group
+      a list of sets. Each tuple contains attractions indices and represent a similarity group
     """
-    sets_list = list()
 
-    # go over all the index pairs in the dataframe
+    sets_list: List[Set[int]] = list()
+
     for idx in similarity_df["index"].values:
         was_selected = False
-
-        # list that contains all the groups sets
-        first_match = set()
+        first_match: Set[int] = set()
 
         for group in sets_list:
-            # if idx has intersection with one of the groups, add the index to the group
             intersec = set(idx) & group
             if len(intersec) > 0:
-                # add the index to the group
                 group.update(idx)
-
-                # save in the first group match (and collect if there are more matches)
                 first_match.update(group)
-
-                # remove the group (it will be inserted with all the matched items )
                 sets_list.remove(group)
-
-                # mark that we have intersection for not adding the idx as different group
                 was_selected = True
-        # after we iterate over all the groups and found the matches for the idx, insert first_match to the sets_list
+
         if len(first_match) > 0:
             sets_list.append(first_match)
 
@@ -227,7 +132,9 @@ def groups_idx(similarity_df):
     return sets_list
 
 
-def groups_df(similarity_df_above_threshold: pd.DataFrame, df: pd.DataFrame) -> list[dict]:
+def groups_df(
+    similarity_df_above_threshold: DataFrame, df: DataFrame
+) -> List[Dict[str, str]]:
     """
     Creates a DataFrame of 'uuid' and 'similarity_uuid' of the attractions which have similarity score above the threshold
 
@@ -239,52 +146,82 @@ def groups_df(similarity_df_above_threshold: pd.DataFrame, df: pd.DataFrame) -> 
       a DataFrame of 'uuid' and 'similarity_uuid'
     """
 
-    # add 'group' column to the above threshold indices and order the dataframe by group
-    display_columns = ['title']
+    display_columns: List[str] = ["uuid"]
+    above_threshold_idx: List[int] = list(
+        set(np.array([idx for idx in similarity_df_above_threshold["index"]]).ravel())
+    )
+    df_above_threshold: DataFrame = df.loc[above_threshold_idx][display_columns]
+    df_above_threshold.columns = ["id"]
+    df_above_threshold["id"] = df_above_threshold["id"].apply(lambda id: str(id))
+    df_above_threshold["similarity_group_id"] = 0
+    groups_list: List[Set[int]] = groups_idx(similarity_df_above_threshold)
 
-    # extract the indices
-    above_threshold_idx = list(set(np.array([idx for idx in similarity_df_above_threshold["index"]]).ravel()))
 
-    # extract the relevant rows from the dataframe
-    df_above_threshold = df.loc[above_threshold_idx][display_columns]
-
-    df_above_threshold['similarity_uuid'] = 0
-
-    # divide the indices to groups according to similarity
-    groups_list = groups_idx(similarity_df_above_threshold)
-
-    # update the group columns according to the groups
     for group in groups_list:
-        df_above_threshold['similarity_uuid'].loc[list(group)] = str(uuid.uuid4())
+        df_above_threshold["similarity_group_id"].loc[list(group)] = str(uuid.uuid4())
 
-    similarity_groups_json = df_above_threshold.to_dict('records')
+    similarity_groups_json: List[Dict[str, str]] = df_above_threshold.to_dict("records")
     return similarity_groups_json
 
 
-def main(json_file):
+def compute_similarity_groups(
+    attractions: List[Dict[str, str]]
+) -> List[Dict[str, str]]:
+    """
+    Creates a similarity uuid for each attraction with similarities
 
-    raw_df = pd.read_json(json_file)
+    Args:
+        attractions: List of dictionaries of the attractions
 
-    df_reduced = data_preprocess(raw_df)
+    Returns:
+        List of dictionaries, each dictionary contains "uuid" : "similarity_uuid"
+    """
 
-    # Creating similarity DataFrame according to 'text'
-    embeddings_text = model_embedding(df_reduced, "text")
-    embeddings_df = pd.DataFrame(embeddings_text)
-    similarity_df = pairs_df_model(embeddings_text)
+    raw_df: DataFrame = pd.DataFrame.from_dict(attractions)
+    df_reduced: DataFrame = dp.data_preprocess(raw_df)
 
-    # create a square matrix of the similarity scores
-    similarity_matrix_text = similarity_matrix(similarity_df, df_reduced)
-    similarity_matrix_text.to_csv("similarity_matrix.csv", index=False)
+    embeddings_text: Tensor = model_embedding(df_reduced, "text")
+    similarity_df: DataFrame = pairs_df_model(embeddings_text)
 
-    # filtering according to 'description' column.
-    similarity_threshold = 0.78
-    similarity_df_above_threshold = similarity_df[similarity_df["score"] > similarity_threshold]
+    similarity_df_above_threshold: DataFrame = similarity_df[
+        similarity_df["score"] > SIMILARITY_THRESHOLD
+    ]
 
-    # extract the rows above the threshold from the dataframe
-    similarity_df_json = groups_df(similarity_df_above_threshold, df_reduced)
+    similarity_df_json: List[Dict[str, str]] = groups_df(
+        similarity_df_above_threshold, df_reduced
+    )
 
     return similarity_df_json
 
 
+# def main() -> None:
+#     similarity_updates: List[Dict[str, str]] = []
+#     try:
+#         db: DataBase = DataBase()
+#         city_names: List[str] = db.fetch_cities_above_n_attractions(
+#             MIN_CITY_ATTRACTION_COUNT
+#         )
+#         print(f"Computing similarity data for {len(city_names)} cities")
+#         for city_name in city_names:
+#             print(f"Current city: {city_name}")
+#             attractions: List[Dict[str, str]] = db.fetch_city_attractions(city_name)
+#             attractions = [atr for atr in attractions if atr["categories_list"]]
+#             similarity_updates.extend(_compute_similarity_groups(attractions))
+#         queue: SQSQueue = SQSQueue(QUEUE_URL)
+#         queue.send_messages(similarity_updates, "similarity", 300)
+#         response = {
+#             "statusCode": 200,
+#             "body": {"message": "updates  were successfully sent to queue"},
+#         }
+#     except Exception as e:
+#         response: Dict[str, Any] = {
+#             "statusCode": 404,
+#             "body": {"message": "Unable to compute similarity data", "details": e},
+#         }
+#     return response
+
+
 if __name__ == "__main__":
-    similarity_json = main('SE365 sample.json')
+    df = pd.read_csv("sample_berlin.csv")
+    data = df.to_dict('records')
+    print(compute_similarity_groups(data))
