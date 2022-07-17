@@ -97,6 +97,25 @@ def similarity_matrix(similarity_idx_df: DataFrame, reduced_df: DataFrame) -> Da
     return similarity_matrix
 
 
+def change_idx_and_cols(similarity_matrix: DataFrame, df: DataFrame, col: str) -> DataFrame:
+    """
+  transform the name of the columns and indices to the name of the specified column
+
+  Args:
+    similarity_matrix: square pd.DataFrame of similarity score of each attraction with each attraction
+    df: pd.DataFrame of the attractions
+    col: The name of the column according to which the columns will be named
+
+  Return:
+    list of dictionaries of similarity scores
+    """
+    similarity_matrix[col] = df[col].apply(lambda uuid: str(uuid))
+    similarity_matrix = similarity_matrix.set_index(col)
+    similarity_matrix.columns = similarity_matrix.index
+
+    return similarity_matrix
+
+
 def groups_idx(similarity_df: DataFrame) -> List[Set[int]]:
     """
     Creates a list of sets, each tuple is a similarity group which contains the attractions indices (A group consists
@@ -155,8 +174,6 @@ def groups_df(
     df_above_threshold["id"] = df_above_threshold["id"].apply(lambda id: str(id))
     df_above_threshold["similarity_group_id"] = 0
     groups_list: List[Set[int]] = groups_idx(similarity_df_above_threshold)
-
-
     for group in groups_list:
         df_above_threshold["similarity_group_id"].loc[list(group)] = str(uuid.uuid4())
 
@@ -192,6 +209,20 @@ def compute_similarity_groups(
     )
 
     return similarity_df_json
+
+def create_similarity_matrix(
+        attractions: List[Dict[str, str]]
+) -> DataFrame:
+    raw_df: DataFrame = pd.DataFrame.from_dict(attractions)
+    df_reduced: DataFrame = dp.data_preprocess(raw_df)
+
+    embeddings_text: Tensor = model_embedding(df_reduced, "title")
+    similarity_df: DataFrame = pairs_df_model(embeddings_text)
+
+    # create a square matrix of the similarity scores
+    similarity_matrix_text = similarity_matrix(similarity_df, df_reduced)
+    similarity_matrix_uuid = change_idx_and_cols(similarity_matrix_text, df_reduced, "uuid")
+    return similarity_matrix_uuid
 
 
 # def main() -> None:
