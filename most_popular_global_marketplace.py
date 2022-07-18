@@ -8,7 +8,7 @@ from torch import Tensor
 import numpy as np
 from typing import Any, Dict, List
 import data_preprocessing as dp
-import attractions_similarity_updater as attrac_sim
+import similarities_for_pipeline as similarity
 
 SIMILARITY_THRESHOLD: float = 0.65
 ATTRACTIONS_PER_SUPPLIER: int = 40
@@ -69,10 +69,11 @@ def choose_x_most_popular_idx(data_with_similarity_id: DataFrame) -> List[int]:
         chosen_attraction_idx: int = random.choice(
             most_popular_df[most_popular_df["inventory_supplier"] == chosen_supplier].index)
         chosen_idx.append(chosen_attraction_idx)
-        similarity_group: str = popular_data.loc[chosen_attraction_idx]["similarity_uuid"]
-
+        print("chosen_idx:", chosen_attraction_idx)
+        similarity_group: str = popular_data.loc[chosen_attraction_idx]["similarity_group_id"]
+        print("similarity_group:", similarity_group)
         if not pd.isna(similarity_group):
-            popular_data: DataFrame = popular_data[popular_data["similarity_uuid"] != similarity_group]
+            popular_data: DataFrame = popular_data[popular_data["similarity_group_id"] != similarity_group]
         else:
             popular_data.drop(index=chosen_attraction_idx, inplace=True)
 
@@ -94,6 +95,7 @@ def create_most_pop_dict(df, chosen_idx):
     chosen_most_pop_df = pd.DataFrame(df["uuid"].iloc[chosen_idx])
     chosen_most_pop_df["uuid"] = chosen_most_pop_df["uuid"].apply(lambda id: str(id))
     chosen_most_pop_df.rename(columns={'uuid': 'attraction_id'}, inplace=True)
+    chosen_most_pop_df['external_city_name'] = df["external_city_name"].iloc[chosen_idx]
     chosen_most_pop_df["rank"] = [i for i in range(1, NUM_ATTRACTIONS_TO_DISPLAY + 1)]
     return chosen_most_pop_df.to_dict('records')
 
@@ -115,11 +117,13 @@ def selected_most_popular(attractions: List[Dict[str, str]]):
     all_popular_attractions_dict: List[Dict[str, str]] = all_most_popular(attractions_df_preprocess)
     all_most_popular_attractions_df = pd.DataFrame.from_dict(all_popular_attractions_dict)
     # create similarity groups
-    similarity_groups: List[Dict[str, str]] = attrac_sim.compute_similarity_groups(all_popular_attractions_dict)
+    similarity_groups: List[Dict[str, str]] = similarity.compute_similarity_groups(all_popular_attractions_dict)
     similarity_groups_df: DataFrame = pd.DataFrame.from_dict(similarity_groups)
 
     similarity_groups_df.rename(columns={'id': 'uuid'}, inplace=True)
     data_with_similarity: DataFrame = pd.merge(all_most_popular_attractions_df, similarity_groups_df, how='outer')
+    #data_with_similarity: DataFrame = pd.concat([all_most_popular_attractions_df, similarity_groups_df], join='outer',
+                                                #axis=1)
 
     chosen_popular_idx: List[int] = choose_x_most_popular_idx(data_with_similarity)
     most_popular_dict = create_most_pop_dict(data_with_similarity, chosen_popular_idx)
@@ -127,3 +131,6 @@ def selected_most_popular(attractions: List[Dict[str, str]]):
     return most_popular_dict
 
 
+#test
+attractions_dict = (pd.read_csv("all_attractions.csv")).to_dict('records')
+print(selected_most_popular(attractions_dict))
